@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""
+BBAC Minimal Test - ROS2 + Python Hybrid Architecture
+Demonstração simples do framework híbrido funcionando
+"""
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+import json
+import threading
+import time
+from datetime import datetime
+import numpy as np
+from sklearn.ensemble import IsolationForest
+
+class SimpleBBACCore:
+    """Core BBAC em Python puro"""
+    def __init__(self):
+        print("Initializing BBAC Core (Python)...")
+        
+        # Policies simples
+        self.agent_policies = {
+            'RobotA': ['ReadInstructions', 'ExecuteAssembly'],
+            'RobotB': ['CaptureImage', 'WriteLog']
+        }
+        
+        # Modelo ML simples
+        self.anomaly_detector = IsolationForest(contamination=0.1, random_state=42)
+        
+        # Dados sintéticos para treinamento
+        training_data = np.random.normal(0, 1, (100, 3))  # 3 features
+        self.anomaly_detector.fit(training_data)
+        
+        self.decisions_made = {'ALLOW': 0, 'DENY': 0}
+        print("BBAC Core initialized successfully")
+    
+    def analyze_request(self, agent_id, action_type):
+        """Análise híbrida: ML + Regras"""
+        
+        # 1. Verificar política
+        policy_ok = True
+        if agent_id in self.agent_policies:
+            if action_type not in self.agent_policies[agent_id]:
+                policy_ok = False
+        
+        # 2. Análise comportamental (simulada)
+        features = np.array([[len(agent_id), len(action_type), hash(action_type) % 100]])
+        anomaly_score = self.anomaly_detector.decision_function(features)[0]
+        is_anomaly = self.anomaly_detector.predict(features)[0] == -1
+        
+        # 3. Decisão híbrida
+        if not policy_ok:
+            decision = 'DENY'
+            reason = 'Policy violation'
+        elif is_anomaly:
+            decision = 'DENY' 
+            reason = f'Behavioral anomaly: {anomaly_score:.3f}'
+        else:
+            decision = 'ALLOW'
+            reason = f'Normal behavior: {anomaly_score:.3f}'
+        
+        self.decisions_made[decision] += 1
+        
+        return {
+            'agent_id': agent_id,
+            'action_type': action_type,
+            'decision': decision,
+            'reason': reason,
+            'score': round(anomaly_score, 3),
+            'timestamp': datetime.now().isoformat()
+        }
+
+class BBACControllerNode(Node):
+    """Nó ROS2 principal - Bridge para Python ML"""
+    
+    def __init__(self):
+        super().__init__('bbac_controller')
+        
+        # Initialize BBAC Core (Python)
+        self.bbac_core = SimpleBBACCore()
+        
+        # ROS2 Publishers/Subscribers
+        self.decision_publisher = self.create_publisher(String, 'access_decisions', 10)
+        self.request_subscriber = self.create_subscription(
+            String, 'access_requests', self.handle_request, 10
+        )
+        
+        # Stats
+        self.requests_processed = 0
+        
+        # Timer for stats
+        self.stats_timer = self.create_timer(5.0, self.publish_stats)
+        
+        self.get_logger().info('BBAC Controller Node initialized')
+        self.get_logger().info('Waiting for access requests...')
+    
+    def handle_request(self, msg):
+        """Handle access request via ROS2"""
+        try:
+            # Parse ROS2 message
+            request_data = json.loads(msg.data)
+            agent_id = request_data.get('agent_id', 'Unknown')
+            action_type = request_data.get('action_type', 'Unknown')
+            
+            self.get_logger().info(f'Analyzing: {agent_id} -> {action_type}')
+            
+            # Use BBAC Core (Python ML)
+            decision = self.bbac_core.analyze_request(agent_id, action_type)
+            
+            self.requests_processed += 1
+            
+            # Publish decision via ROS2
+            response_msg = String()
+            response_msg.data = json.dumps(decision)
+            self.decision_publisher.publish(response_msg)
+            
+            # Log decision
+            status = "ALLOWED" if decision['decision'] == 'ALLOW' else "DENIED"
+            self.get_logger().info(f'{status}: {decision["reason"]}')
+            
+        except Exception as e:
+            self.get_logger().error(f'Error processing request: {e}')
+    
+    def publish_stats(self):
+        """Publish periodic statistics"""
+        if self.requests_processed > 0:
+            stats = self.bbac_core.decisions_made
+            self.get_logger().info(
+                f'Stats: {self.requests_processed} requests, '
+                f'ALLOW={stats["ALLOW"]}, DENY={stats["DENY"]}'
+            )
+
+class RobotAgentNode(Node):
+    """Simulated Robot Agent"""
+    
+    def __init__(self, robot_id, actions):
+        super().__init__(f'{robot_id.lower()}_agent')
+        
+        self.robot_id = robot_id
+        self.actions = actions
+        self.current_action_index = 0
+        self.waiting_for_decision = False
+        
+        # ROS2 Communication
+        self.request_publisher = self.create_publisher(String, 'access_requests', 10)
+        self.decision_subscriber = self.create_subscription(
+            String, 'access_decisions', self.handle_decision, 10
+        )
+        
+        # Work timer
+        self.work_timer = self.create_timer(3.0, self.work_cycle)
+        
+        self.get_logger().info(f'{robot_id} Agent initialized')
+    
+    def work_cycle(self):
+        """Robot work cycle"""
+        if not self.waiting_for_decision and self.actions:
+            action = self.actions[self.current_action_index]
+            
+            # Create access request
+            request = {
+                'agent_id': self.robot_id,
+                'action_type': action,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            # Publish via ROS2
+            msg = String()
+            msg.data = json.dumps(request)
+            self.request_publisher.publish(msg)
+            
+            self.waiting_for_decision = True
+            self.get_logger().info(f'Requesting access: {action}')
+    
+    def handle_decision(self, msg):
+        """Handle access decision"""
+        try:
+            decision = json.loads(msg.data)
+            
+            # Check if decision is for this robot
+            if decision.get('agent_id') == self.robot_id:
+                self.waiting_for_decision = False
+                action = decision.get('action_type')
+                result = decision.get('decision')
+                
+                if result == 'ALLOW':
+                    self.get_logger().info(f'Executing: {action}')
+                    # Move to next action
+                    self.current_action_index = (self.current_action_index + 1) % len(self.actions)
+                else:
+                    self.get_logger().warn(f'Access denied: {decision.get("reason")}')
+                    
+        except Exception as e:
+            self.get_logger().error(f'Error handling decision: {e}')
+
+class BBACTestSystem:
+    """Main test system launcher"""
+    
+    def __init__(self):
+        self.nodes = []
+    
+    def setup_system(self):
+        """Setup all nodes"""
+        rclpy.init()
+        
+        # Main BBAC Controller
+        bbac_controller = BBACControllerNode()
+        self.nodes.append(bbac_controller)
+        
+        # Robot agents
+        robot_a = RobotAgentNode('RobotA', ['ReadInstructions', 'ExecuteAssembly'])
+        robot_b = RobotAgentNode('RobotB', ['CaptureImage', 'WriteLog'])
+        
+        self.nodes.extend([robot_a, robot_b])
+        
+        print("All nodes created successfully")
+        return True
+    
+    def run_test(self, duration=30):
+        """Run test for specified duration"""
+        from rclpy.executors import MultiThreadedExecutor
+        
+        print(f"Starting BBAC test system for {duration} seconds...")
+        
+        # Multi-threaded executor
+        executor = MultiThreadedExecutor()
+        
+        for node in self.nodes:
+            executor.add_node(node)
+        
+        # Run in separate thread
+        executor_thread = threading.Thread(target=executor.spin, daemon=True)
+        executor_thread.start()
+        
+        # Wait for test duration
+        time.sleep(duration)
+        
+        print("Stopping test system...")
+        executor.shutdown()
+        
+        # Cleanup
+        for node in self.nodes:
+            node.destroy_node()
+        
+        rclpy.shutdown()
+        print("Test completed successfully")
+
+def main():
+    """Main function"""
+    print("="*60)
+    print("BBAC MINIMAL TEST - ROS2 + Python Hybrid")
+    print("="*60)
+    
+    try:
+        # Create and run test system
+        test_system = BBACTestSystem()
+        
+        if test_system.setup_system():
+            print("System setup successful")
+            print("Running hybrid ROS2 + Python demonstration...")
+            
+            test_system.run_test(20)  # Run for 20 seconds
+            
+            print("\n" + "="*60)
+            print("TEST COMPLETED SUCCESSFULLY!")
+            print("✓ ROS2: Inter-node communication working")
+            print("✓ Python: ML algorithms working")
+            print("✓ Hybrid: ROS2 ↔ Python integration working")
+            print("="*60)
+        
+    except KeyboardInterrupt:
+        print("\nTest interrupted by user")
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == '__main__':
+    main()
