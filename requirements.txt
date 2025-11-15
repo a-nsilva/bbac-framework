@@ -1,3 +1,6 @@
+# Core dependencies for Behavior-Based Access Control for Industrial Multi-Agent Systems
+# Python 3.10 required
+
 # ROS2
 
 
