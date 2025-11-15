@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+data/raw/*.csv
+data/processed/*.csv
+*.log
+.vscode/
+*.bag
+build/
+install/
+log/
+EOF
